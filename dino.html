@@ -1,0 +1,413 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Dino Run</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #87CEEB;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            touch-action: none;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            width: 100%;
+            max-width: 800px;
+            max-height: 600px;
+            border: 2px solid #333;
+            border-radius: 10px;
+        }
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            z-index: 10;
+        }
+        .controls button {
+            background: linear-gradient(45deg, #ff4500, #ff8c00);
+            border: 2px solid #fff;
+            border-radius: 15px;
+            color: #fff;
+            font-size: 24px;
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .controls button:hover {
+            box-shadow: 0 0 15px #ff4500;
+        }
+        .controls button:active {
+            transform: scale(0.95);
+        }
+        #score {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: #fff;
+            font-size: 26px;
+            text-shadow: 2px 2px 4px #000;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 8px 16px;
+            border-radius: 10px;
+        }
+        #gameOver {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #fff;
+            font-size: 32px;
+            text-align: center;
+            text-shadow: 2px 2px 4px #000;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px 40px;
+            border-radius: 15px;
+            display: none;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.05); }
+            100% { transform: translate(-50%, -50%) scale(1); }
+        }
+        @media (max-width: 600px) {
+            .controls {
+                display: block;
+            }
+            .controls button {
+                font-size: 20px;
+                padding: 8px 16px;
+            }
+            #score {
+                font-size: 22px;
+            }
+            #gameOver {
+                font-size: 28px;
+                padding: 15px 30px;
+            }
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+</head>
+<body>
+    <div class="controls">
+        <button id="jump" ontouchstart="jump()">⬆️ Jump</button>
+        <button id="duck" ontouchstart="duck(true)" ontouchend="duck(false)">⬇️ Duck</button>
+        <button id="restart" ontouchstart="resetGame()" style="display: none;">🔄 Restart</button>
+    </div>
+    <div id="score">Score: 0 | Best: 0</div>
+    <div id="gameOver">Game Over!<br>Score: 0<br>Tap Restart or press R</div>
+    <script>
+        let scene, camera, renderer, dino, ground, obstacles, score, gameState, bestScore;
+        let isJumping = false;
+        let isDucking = false;
+        let jumpVelocity = 0;
+        let gravity = -1.2;
+        let speed = 0.1;
+        let lastSpawnTime = 0;
+        let animationFrame = 0;
+        let dustParticles = [];
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 3, 12);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            const sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            sunLight.position.set(10, 10, 10);
+            sunLight.castShadow = true;
+            sunLight.shadow.mapSize.width = 512;
+            sunLight.shadow.mapSize.height = 512;
+            sunLight.shadow.camera.near = 0.5;
+            sunLight.shadow.camera.far = 50;
+            scene.add(sunLight);
+            scene.add(new THREE.AmbientLight(0x404040));
+
+            const skyGeometry = new THREE.SphereGeometry(500, 32, 32);
+            const skyMaterial = new THREE.MeshBasicMaterial({ color: 0x87CEEB, side: THREE.BackSide });
+            const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+            scene.add(sky);
+
+            const groundGeometry = new THREE.PlaneGeometry(100, 100);
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: 0xD2B48C });
+            ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = -2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            dino = new THREE.Group();
+            const bodyGeometry = new THREE.BoxGeometry(1, 0.8, 2);
+            const headGeometry = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+            const tailGeometry = new THREE.BoxGeometry(0.4, 0.4, 1.2);
+            const legGeometry = new THREE.BoxGeometry(0.3, 0.5, 0.3);
+            const dinoMaterial = new THREE.MeshLambertMaterial({ color: 0x228B22 });
+            const body = new THREE.Mesh(bodyGeometry, dinoMaterial);
+            const head = new THREE.Mesh(headGeometry, dinoMaterial);
+            const tail = new THREE.Mesh(tailGeometry, dinoMaterial);
+            const leg1 = new THREE.Mesh(legGeometry, dinoMaterial);
+            const leg2 = new THREE.Mesh(legGeometry, dinoMaterial);
+            body.position.set(0, 0, 0);
+            head.position.set(0, 0.7, 0.8);
+            tail.position.set(0, 0, -1.2);
+            leg1.position.set(0.3, -0.65, 0);
+            leg2.position.set(-0.3, -0.65, 0);
+            body.castShadow = true;
+            head.castShadow = true;
+            tail.castShadow = true;
+            leg1.castShadow = true;
+            leg2.castShadow = true;
+            dino.add(body);
+            dino.add(head);
+            dino.add(tail);
+            dino.add(leg1);
+            dino.add(leg2);
+            dino.position.set(-5, -1, 0);
+            scene.add(dino);
+
+            obstacles = [];
+            spawnObstacle();
+
+            score = 0;
+            bestScore = localStorage.getItem('dinoBestScore') || 0;
+            gameState = 'playing';
+            document.getElementById('score').textContent = `Score: ${score} | Best: ${bestScore}`;
+            document.getElementById('gameOver').style.display = 'none';
+            document.getElementById('restart').style.display = 'none';
+
+            document.addEventListener('keydown', onKeyDown);
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function spawnObstacle() {
+            const isCactus = Math.random() < 0.7;
+            const isGroup = isCactus && Math.random() < 0.3;
+            if (isCactus) {
+                const size = Math.random() < 0.5 ? 0.5 : 0.8;
+                const obstacleGeometry = new THREE.BoxGeometry(size, size * 2, 0.5);
+                const obstacleMaterial = new THREE.MeshLambertMaterial({ color: 0x4B5320 });
+                const obstacle = new THREE.Mesh(obstacleGeometry, obstacleMaterial);
+                obstacle.position.set(10, -2 + size, 0);
+                obstacle.castShadow = true;
+                scene.add(obstacle);
+                obstacles.push(obstacle);
+                if (isGroup) {
+                    const extraObstacle = new THREE.Mesh(obstacleGeometry, obstacleMaterial);
+                    extraObstacle.position.set(10, -2 + size, 0.8);
+                    extraObstacle.castShadow = true;
+                    scene.add(extraObstacle);
+                    obstacles.push(extraObstacle);
+                }
+            } else {
+                const birdGeometry = new THREE.BoxGeometry(0.6, 0.4, 0.8);
+                const birdMaterial = new THREE.MeshLambertMaterial({ color: 0x696969 });
+                const bird = new THREE.Mesh(birdGeometry, birdMaterial);
+                const height = Math.random() < 0.5 ? 0 : 1;
+                bird.position.set(10, height, 0);
+                bird.castShadow = true;
+                scene.add(bird);
+                obstacles.push(bird);
+            }
+        }
+
+        function createDust() {
+            for (let i = 0; i < 8; i++) {
+                const particleGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+                const particleMaterial = new THREE.MeshLambertMaterial({ color: 0xD2B48C });
+                const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+                particle.position.set(dino.position.x + random(-0.5, 0.5), -1.9, dino.position.z + random(-0.5, 0.5));
+                particle.velocity = new THREE.Vector3(random(-0.1, 0.1), random(0.1, 0.3), random(-0.1, 0.1));
+                particle.lifespan = 20;
+                scene.add(particle);
+                dustParticles.push(particle);
+            }
+        }
+
+        function jump() {
+            if (!isJumping && !isDucking && gameState === 'playing') {
+                isJumping = true;
+                jumpVelocity = 4;
+            }
+        }
+
+        function duck(state) {
+            if (!isJumping && gameState === 'playing') {
+                isDucking = state;
+                dino.children[0].scale.y = state ? 0.5 : 1;
+                dino.children[1].position.y = state ? 0.5 : 0.7;
+            }
+        }
+
+        function onKeyDown(event) {
+            if (event.code === 'Space') jump();
+            if (event.code === 'KeyS') duck(true);
+            if (event.code === 'KeyR' && gameState === 'gameover') resetGame();
+        }
+
+        function onKeyUp(event) {
+            if (event.code === 'KeyS') duck(false);
+        }
+
+        document.addEventListener('keyup', onKeyUp);
+
+        function resetGame() {
+            obstacles.forEach(obstacle => scene.remove(obstacle));
+            dustParticles.forEach(particle => scene.remove(particle));
+            obstacles = [];
+            dustParticles = [];
+            dino.position.y = -1;
+            dino.children[0].scale.y = 1;
+            dino.children[1].position.y = 0.7;
+            score = 0;
+            speed = 0.1;
+            gameState = 'playing';
+            document.getElementById('score').textContent = `Score: ${score} | Best: ${bestScore}`;
+            document.getElementById('gameOver').style.display = 'none';
+            document.getElementById('restart').style.display = 'none';
+            spawnObstacle();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameState === 'playing') {
+                animationFrame++;
+
+                // Анимация динозаврика
+                dino.children[3].position.y = -0.65 + Math.sin(animationFrame * 0.2) * 0.1;
+                dino.children[4].position.y = -0.65 - Math.sin(animationFrame * 0.2) * 0.1;
+
+                // Обновление динозаврика
+                if (isJumping) {
+                    dino.position.y += jumpVelocity * 0.1;
+                    jumpVelocity += gravity * 0.1;
+                    if (dino.position.y <= -1) {
+                        dino.position.y = -1;
+                        isJumping = false;
+                        jumpVelocity = 0;
+                        createDust();
+                    }
+                }
+
+                // Движение препятствий
+                const currentTime = Date.now();
+                obstacles.forEach((obstacle, index) => {
+                    obstacle.position.x -= speed;
+                    if (obstacle.position.x < -10) {
+                        scene.remove(obstacle);
+                        obstacles.splice(index, 1);
+                        if (currentTime - lastSpawnTime > 1500 / speed) {
+                            spawnObstacle();
+                            lastSpawnTime = currentTime;
+                        }
+                        score += 10;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            localStorage.setItem('dinoBestScore', bestScore);
+                        }
+                        document.getElementById('score').textContent = `Score: ${score} | Best: ${bestScore}`;
+                    }
+
+                    // Проверка столкновения
+                    const dx = dino.position.x - obstacle.position.x;
+                    const dy = dino.position.y - obstacle.position.y;
+                    const dz = dino.position.z - obstacle.position.z;
+                    const obstacleHeight = obstacle.geometry.parameters.height || 0.4;
+                    if (Math.abs(dx) < 1 && Math.abs(dy) < (isDucking ? 0.5 : obstacleHeight) && Math.abs(dz) < 0.8) {
+                        gameState = 'gameover';
+                        createDust();
+                        document.getElementById('gameOver').textContent = `Game Over!\nScore: ${score}\nTap Restart or press R`;
+                        document.getElementById('gameOver').style.display = 'block';
+                        document.getElementById('restart').style.display = 'block';
+                    }
+                });
+
+                // Обновление частиц пыли
+                dustParticles.forEach((particle, index) => {
+                    particle.position.add(particle.velocity);
+                    particle.lifespan--;
+                    if (particle.lifespan <= 0) {
+                        scene.remove(particle);
+                        dustParticles.splice(index, 1);
+                    }
+                });
+
+                speed += 0.0003;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function random(min, max) {
+            return Math.random() * (max - min) + min;
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>
